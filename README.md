@@ -16,8 +16,9 @@ Manual examination timetable generation in higher-education institutions is noto
 
 The **One-Click Exam Datesheet Generator** completely eliminates manual scheduling friction. Built with **Laravel 12, Livewire 3, Alpine.js, Tailwind CSS, and MySQL 8 (utf8mb4)**, the system models exam timetabling as an exact **Constraint Satisfaction & Optimization Problem (CSP/COP)**. It features:
 - **Zero Hardcoding**: Timing windows, exam durations ($D$), mandatory transition breaks ($B$), room inventories, shift boundaries, and holiday exclusions are 100% dynamic.
-- **Sub-Second Native Solver**: A hybridized **DSATUR Heuristic Graph Coloring** engine coupled with **Simulated Annealing Metaheuristics** schedules 40+ courses across multiple shifts in **~0.02 seconds** with **0 hard constraint violations**.
-- **Independent Standalone Validator (`DatesheetValidator`)**: Every generated datesheet and manual move is independently audited against 9 hard constraints (H1–H9) and evaluated on soft quality metrics (S1–S6).
+- **Sub-Second Native Solver**: A hybridized **DSATUR Heuristic Graph Coloring** engine coupled with **Simulated Annealing Metaheuristics** schedules 130+ courses across multiple shifts in **~0.07 seconds** with **0 hard constraint violations**.
+- **Synchronized Co-Exam Scheduling (Paper Leak Prevention - H10)**: For courses sharing the same examination paper across multiple sections/degrees, the solver guarantees that all parallel sections in the same shift are scheduled in the **exact same time slot on the exact same date**, eliminating exam leak risks.
+- **Independent Standalone Validator (`DatesheetValidator`)**: Every generated datesheet and manual move is independently audited against 10 hard constraints (H1–H10) and evaluated on soft quality metrics (S1–S6).
 - **Infeasibility Bottleneck Diagnostics**: If scheduling is mathematically impossible, the system never hangs or crashes—it pinpoints exact resource deficits and prints actionable remedies.
 - **Live Interactive UI**: Livewire-powered Day $\times$ Slot interactive timetable matrix, What-If simulation sandbox, full version control with diffs, Spatie activity logging, Excel bulk import/export, and bilingual (Urdu RTL & English) printable / PDF output.
 
@@ -41,7 +42,7 @@ flowchart TD
         Solver[NativePhpSolver\nDSATUR + Simulated Annealing]
         RA[RoomAllocator\nConflict-Free Room Matching]
         IA[InvigilatorAllocator\nFair Load-Balanced Assignment]
-        VAL[DatesheetValidator\nIndependent 9-Constraint Auditor]
+        VAL[DatesheetValidator\nIndependent 10-Constraint Auditor]
     end
 
     subgraph Web UI [Livewire & Presentation Layer]
@@ -292,7 +293,7 @@ datesheet/
 │   │   │   ├── SlotGenerator.php              # Dynamic timing & Friday blackout pruning
 │   │   │   ├── ConflictGraphBuilder.php       # G = (V, E) graph and adjacency matrix
 │   │   │   ├── FeasibilityChecker.php         # Bottleneck diagnostics & fixes
-│   │   │   ├── DatesheetValidator.php         # Standalone 9-hard-constraint auditor
+│   │   │   ├── DatesheetValidator.php         # Standalone 10-hard-constraint auditor
 │   │   │   ├── RoomAllocator.php              # Conflict-free room assignment
 │   │   │   ├── InvigilatorAllocator.php       # Load-balanced teacher invigilation
 │   │   │   └── DemoDataGenerator.php          # 40-course repeatable demo generator

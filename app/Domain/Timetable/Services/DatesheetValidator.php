@@ -68,6 +68,7 @@ final class DatesheetValidator
         $batchDatesTracker = [];        // [batch_id][] => exam_date
         $teacherDutyTracker = [];       // [teacher_id] => duty_count
         $dayExamCountTracker = [];      // [date] => exam_count
+        $shiftSubjectSlotTracker = [];  // [shift_id][normalized_subject_name][slot_key][] => course_code
 
         // Determine all unique dates sorted to detect late placement for core courses
         $allDates = array_values(array_unique(array_map(fn(SlotDto $s) => $s->date, $validSlotsByKey)));
@@ -197,6 +198,10 @@ final class DatesheetValidator
                 $teacherDutyTracker[$teacherId] = ($teacherDutyTracker[$teacherId] ?? 0) + 1;
             }
 
+            // Track for H10: Paper Leak Prevention (same shift, same subject -> must sit in exact same slot)
+            $normSubjectName = trim(strtolower($course->name));
+            $shiftSubjectSlotTracker[$slot->shiftId][$normSubjectName][$slotKey][] = $course->code;
+
             // Collect soft constraint tracking data
             $batchDatesTracker[$course->batchId][] = $slot->date;
             $dayExamCountTracker[$slot->date] = ($dayExamCountTracker[$slot->date] ?? 0) + 1;
@@ -212,7 +217,28 @@ final class DatesheetValidator
             }
         }
 
-        // 9. Soft Constraint S1 & S2: Spacing & Max per day per batch
+        // 9. Verify H10: Paper Leak Prevention (Synchronized Same-Shift Parallel Courses)
+        // In university examinations, 2 distinct papers are prepared per subject (1 Morning, 1 Evening).
+        // Therefore, all sections/classes within the same shift taking the same subject MUST sit
+        // in the exact same time slot on the same day so paper leakage is completely eliminated.
+        foreach ($shiftSubjectSlotTracker as $shiftId => $subjectMap) {
+            foreach ($subjectMap as $normName => $slotMap) {
+                if (count($slotMap) > 1) {
+                    $slotDetails = [];
+                    foreach ($slotMap as $sKey => $codes) {
+                        $slotDetails[] = sprintf('Slot [%s] for (%s)', $sKey, implode(', ', $codes));
+                    }
+                    $hardViolations[] = sprintf(
+                        'Paper Leak Violation (H10): Subject "%s" has parallel sections in Shift ID %d scheduled in different slots: %s. All sections taking the same shift paper must sit in the exact same time slot to prevent paper leakage.',
+                        ucwords($normName),
+                        $shiftId,
+                        implode(' vs ', $slotDetails)
+                    );
+                }
+            }
+        }
+
+        // 10. Soft Constraint S1 & S2: Spacing & Max per day per batch
         foreach ($batchDatesTracker as $batchId => $dates) {
             sort($dates);
             $dateCounts = array_count_values($dates);

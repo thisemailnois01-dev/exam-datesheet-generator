@@ -221,6 +221,23 @@ class TimetableGrid extends Component
             return;
         }
 
+        // 3. Check Paper Leak Prevention (H10): All sections of the same subject in the same shift must sit in the same slot
+        $normMovingCourseName = trim(strtolower($movingExam->course->name));
+        foreach ($otherExams as $oe) {
+            if ($oe->shift_id === $this->newShiftId && trim(strtolower($oe->course->name)) === $normMovingCourseName) {
+                if ($oe->exam_date->format('Y-m-d') !== $this->newExamDate || $oe->slot_index !== $this->newSlotIndex) {
+                    $this->moveValidationError = sprintf(
+                        'PAPER LEAK VIOLATION (H10): Subject "%s" has another section (%s) scheduled on %s in Slot %d. All sections in the same shift taking this paper must sit in the exact same slot.',
+                        $movingExam->course->name,
+                        $oe->batch->name,
+                        $oe->exam_date->format('Y-m-d'),
+                        $oe->slot_index
+                    );
+                    return;
+                }
+            }
+        }
+
         // Apply move in DB transaction
         DB::transaction(function () use ($movingExam, $targetSlotDto) {
             $movingExam->update([

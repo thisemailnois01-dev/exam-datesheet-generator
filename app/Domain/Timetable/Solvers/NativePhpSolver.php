@@ -149,116 +149,150 @@ final class NativePhpSolver implements SolverInterface
             }
         }
 
-        // Consecutive Daily Exam Assignment (Each batch takes 1 exam per working day until finished)
+        // Consecutive Daily Exam Assignment with Synchronized Same-Shift Paper Scheduling (Paper Leak Prevention)
         if ($dailyConsecutiveMode) {
-            $coursesByBatch = [];
+            // Group uncolored courses by (normalized_name, shift_id) to eliminate paper leak risks
+            $courseGroups = [];
             foreach ($uncoloredKeys as $uKey => $_) {
-                $coursesByBatch[$nodes[$uKey]->batchId][] = $uKey;
+                $node = $nodes[$uKey];
+                $normName = trim(strtolower($node->name));
+                $shiftId = $node->shiftId ?? 0;
+                $gKey = $normName . '||' . $shiftId;
+                $courseGroups[$gKey][] = $node;
             }
 
             $distinctWorkingDates = array_values(array_unique(array_map(fn($s) => $s->date, $slots)));
             sort($distinctWorkingDates);
 
-            foreach ($coursesByBatch as $batchId => $batchCourseKeys) {
-                $takenDates = [];
-                foreach ($coloredAssignments as $cKey => $cSlot) {
-                    if ($nodes[$cKey]->batchId === $batchId) {
-                        $takenDates[$cSlot->date] = true;
-                    }
+            $slotsByShiftAndDate = [];
+            foreach ($slots as $s) {
+                $slotsByShiftAndDate[$s->shiftId][$s->date][] = $s;
+            }
+
+            // Track scheduled date per course name to align Morning & Evening shifts on the same date when possible
+            $scheduledDateByCourseName = [];
+            foreach ($coloredAssignments as $cKey => $cSlot) {
+                $scheduledDateByCourseName[trim(strtolower($nodes[$cKey]->name))] = $cSlot->date;
+            }
+
+            // Sort groups: multi-section groups first (most constrained), then Core/Hard
+            uasort($courseGroups, function ($gA, $gB) {
+                if (count($gA) !== count($gB)) {
+                    return count($gB) <=> count($gA);
+                }
+                $coreA = array_sum(array_map(fn($n) => $n->isHard ? 2 : ($n->isCore ? 1 : 0), $gA));
+                $coreB = array_sum(array_map(fn($n) => $n->isHard ? 2 : ($n->isCore ? 1 : 0), $gB));
+                return $coreB <=> $coreA;
+            });
+
+            // Track which dates are taken by which batches
+            $batchDayAssigned = [];
+            foreach ($coloredAssignments as $cKey => $cSlot) {
+                $batchDayAssigned[$nodes[$cKey]->batchId][$cSlot->date] = true;
+            }
+
+            foreach ($courseGroups as $gKey => $groupMembers) {
+                $shiftId = $groupMembers[0]->shiftId;
+                $participatingBatches = array_map(fn($n) => $n->batchId, $groupMembers);
+                $memberKeys = array_map(fn($n) => $n->getKey(), $groupMembers);
+                $normName = trim(strtolower($groupMembers[0]->name));
+
+                $bestSlot = null;
+                $minOccupancy = PHP_INT_MAX;
+
+                // Check if this course was already scheduled in another shift and prioritize that same date
+                $preferredDate = $scheduledDateByCourseName[$normName] ?? null;
+                $orderedDates = $distinctWorkingDates;
+                if ($preferredDate !== null && in_array($preferredDate, $orderedDates, true)) {
+                    $orderedDates = array_values(array_unique(array_merge([$preferredDate], $orderedDates)));
                 }
 
-                $availableDatesForBatch = [];
-                foreach ($distinctWorkingDates as $wDate) {
-                    if (!isset($takenDates[$wDate])) {
-                        $availableDatesForBatch[] = $wDate;
+                foreach ($orderedDates as $date) {
+                    // Check if ANY participating batch already has an exam on this date
+                    $dateBlocked = false;
+                    foreach ($participatingBatches as $bId) {
+                        if (isset($batchDayAssigned[$bId][$date])) {
+                            $dateBlocked = true;
+                            break;
+                        }
                     }
-                }
-
-                // Sort courses in batch (Core/Hard first)
-                usort($batchCourseKeys, function ($a, $b) use ($nodes) {
-                    $nodeA = $nodes[$a];
-                    $nodeB = $nodes[$b];
-                    $scoreA = ($nodeA->isHard ? 2 : 0) + ($nodeA->isCore ? 1 : 0);
-                    $scoreB = ($nodeB->isHard ? 2 : 0) + ($nodeB->isCore ? 1 : 0);
-                    return $scoreB <=> $scoreA;
-                });
-
-                foreach ($batchCourseKeys as $idx => $bKey) {
-                    $targetDate = $availableDatesForBatch[$idx] ?? ($distinctWorkingDates[$idx % count($distinctWorkingDates)] ?? null);
-                    if ($targetDate === null) {
+                    if ($dateBlocked) {
                         continue;
                     }
 
-                    $node = $nodes[$bKey];
-
-                    $candidateSlots = array_values(array_filter($slots, function (SlotDto $s) use ($targetDate, $node, $isShiftStrict) {
-                        if ($s->date !== $targetDate) {
-                            return false;
-                        }
-                        if ($isShiftStrict && $node->shiftId !== null) {
-                            return $s->shiftId === $node->shiftId;
-                        }
-                        return true;
-                    }));
-
-                    $bestSlot = null;
-                    $minOcc = PHP_INT_MAX;
+                    $candidateSlots = $slotsByShiftAndDate[$shiftId][$date] ?? [];
+                    if (empty($candidateSlots) && !$isShiftStrict) {
+                        $candidateSlots = array_values(array_filter($slots, fn($s) => $s->date === $date));
+                    }
 
                     foreach ($candidateSlots as $candSlot) {
                         $sKey = $candSlot->getKey();
-                        $occCount = count($slotOccupancy[$sKey] ?? []);
-                        if ($occCount >= $totalActiveRooms) {
+                        $currentOcc = count($slotOccupancy[$sKey] ?? []);
+                        if ($currentOcc + count($groupMembers) > $totalActiveRooms) {
                             continue;
                         }
 
                         $hasClash = false;
                         foreach ($slotOccupancy[$sKey] ?? [] as $occKey) {
-                            if (isset($adjacency[$bKey][$occKey])) {
-                                $hasClash = true;
-                                break;
+                            foreach ($memberKeys as $mKey) {
+                                if (isset($adjacency[$mKey][$occKey])) {
+                                    $hasClash = true;
+                                    break 2;
+                                }
                             }
                         }
                         if ($hasClash) {
                             continue;
                         }
 
-                        if ($occCount < $minOcc) {
-                            $minOcc = $occCount;
+                        if ($currentOcc < $minOccupancy) {
+                            $minOccupancy = $currentOcc;
                             $bestSlot = $candSlot;
+                            break 2; // Found early date slot!
                         }
                     }
+                }
 
-                    if ($bestSlot === null) {
-                        // Look across available working dates strictly respecting shift constraints
-                        foreach ($distinctWorkingDates as $altDate) {
-                            if (isset($takenDates[$altDate])) continue;
-                            foreach ($slots as $candSlot) {
-                                if ($candSlot->date !== $altDate) continue;
-                                if ($isShiftStrict && $node->shiftId !== null && $candSlot->shiftId !== $node->shiftId) continue;
-                                $sKey = $candSlot->getKey();
-                                if (count($slotOccupancy[$sKey] ?? []) >= $totalActiveRooms) continue;
-                                $hasClash = false;
-                                foreach ($slotOccupancy[$sKey] ?? [] as $occKey) {
-                                    if (isset($adjacency[$bKey][$occKey])) {
+                // Fallback: If preferred date couldn't fit, search across all available working dates
+                if ($bestSlot === null) {
+                    foreach ($distinctWorkingDates as $altDate) {
+                        $candidateSlots = $isShiftStrict && $shiftId !== null
+                            ? ($slotsByShiftAndDate[$shiftId][$altDate] ?? [])
+                            : array_values(array_filter($slots, fn($s) => $s->date === $altDate));
+
+                        foreach ($candidateSlots as $candSlot) {
+                            $sKey = $candSlot->getKey();
+                            if (count($slotOccupancy[$sKey] ?? []) + count($groupMembers) > $totalActiveRooms) {
+                                continue;
+                            }
+                            $hasClash = false;
+                            foreach ($slotOccupancy[$sKey] ?? [] as $occKey) {
+                                foreach ($memberKeys as $mKey) {
+                                    if (isset($adjacency[$mKey][$occKey])) {
                                         $hasClash = true;
-                                        break;
+                                        break 2;
                                     }
                                 }
-                                if (!$hasClash) {
-                                    $bestSlot = $candSlot;
-                                    $takenDates[$altDate] = true;
-                                    break 2;
-                                }
+                            }
+                            if (!$hasClash) {
+                                $bestSlot = $candSlot;
+                                break 2;
                             }
                         }
                     }
+                }
 
-                    if ($bestSlot !== null) {
-                        $coloredAssignments[$bKey] = $bestSlot;
-                        $slotOccupancy[$bestSlot->getKey()][] = $bKey;
-                        unset($uncoloredKeys[$bKey]);
+                if ($bestSlot !== null) {
+                    $sKey = $bestSlot->getKey();
+                    $scheduledDateByCourseName[$normName] = $bestSlot->date;
+                    foreach ($groupMembers as $node) {
+                        $mKey = $node->getKey();
+                        $coloredAssignments[$mKey] = $bestSlot;
+                        $slotOccupancy[$sKey][] = $mKey;
+                        $batchDayAssigned[$node->batchId][$bestSlot->date] = true;
+                        unset($uncoloredKeys[$mKey]);
 
-                        foreach ($adjacency[$bKey] as $neighborKey => $_) {
+                        foreach ($adjacency[$mKey] as $neighborKey => $_) {
                             if (isset($uncoloredKeys[$neighborKey])) {
                                 $saturationDegrees[$neighborKey]++;
                             }
